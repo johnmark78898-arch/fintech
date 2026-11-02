@@ -1,0 +1,20 @@
+[
+  {
+    "source_id": "sba-manage-finances",
+    "title": "Manage your finances",
+    "publisher": "U.S. Small Business Administration",
+    "url": "https://www.sba.gov/counseling/manage-your-business/",
+    "edition": "Current page; version recorded at ingestion",
+    "scope": "Agency-authored guidance on bookkeeping and managing business finances.",
+    "rights_basis": "17 U.S.C. sections 101 and 105 apply to qualifying U.S. Government works. Ingest only SBA-authored main-page text; exclude linked pages, logos, images, and third-party material."
+  },
+  {
+    "source_id": "irs-publication-334-2025",
+    "title": "Publication 334 (2025), Tax Guide for Small Business",
+    "publisher": "Internal Revenue Service",
+    "url": "https://www.irs.gov/publications/p334",
+    "edition": "2025",
+    "scope": "Federal tax information about small-business income, expenses, and accounting.",
+    "rights_basis": "17 U.S.C. sections 101 and 105 apply to qualifying U.S. Government works. Ingest only IRS-authored publication text; exclude linked pages, logos, images, and third-party material."
+  }
+]
