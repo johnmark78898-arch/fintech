@@ -2,6 +2,7 @@ from pathlib import Path
 
 from app.api.routes.imports import router as imports_router
 from app.api.routes.public_library import router as public_library_router
+from app.api.routes.recommendations import router as recommendations_router
 from app.core.config import get_settings
 from app.database.session import get_engine
 from fastapi import FastAPI, Response, status
@@ -13,6 +14,7 @@ settings = get_settings()
 app = FastAPI(title=settings.service_name, version="0.1.0")
 app.include_router(imports_router, prefix="/api/v1")
 app.include_router(public_library_router, prefix="/api/v1")
+app.include_router(recommendations_router, prefix="/api/v1")
 
 DEMO_SAMPLE_PATH = (
     Path(__file__).resolve().parents[2]

@@ -305,9 +305,53 @@ td.amount-cell.outflow { color: #ad7953; }
 .quality-note-grid strong { color: #4b5c50; font-size: 11px; }
 .quality-note-grid span { color: #909b92; font-size: 8px; }
 .attribute-metrics { margin-top: 9px; }
+.recommendation-panel { margin-top: 14px; padding: 18px; }
+.recommendation-heading { align-items: center; display: flex; gap: 11px; }
+.recommendation-icon { align-items: center; background: #f1eef8; border-radius: 7px; color: #806bb0; display: flex; flex: 0 0 34px; height: 34px; justify-content: center; }
+.recommendation-copy { flex: 1; min-width: 0; }
+.recommendation-copy h2 { color: #304036; font: 700 12px "Segoe UI", sans-serif; }
+.recommendation-copy p { color: #8d9990; font-size: 9px; line-height: 1.5; margin-top: 4px; }
+.recommendation-panel .button:disabled { background: #e6ece7; box-shadow: none; color: #89978d; cursor: not-allowed; transform: none; }
+.recommendation-notice { background: #fffbf5; border: 1px solid #f1eadf; border-radius: 5px; color: #897a62; font-size: 9px; line-height: 1.5; margin-top: 13px; padding: 9px 11px; }
+.recommendation-error { color: #a36455; font-size: 9px; line-height: 1.5; margin-top: 12px; }
+.recommendation-loading { color: #7d897f; font-size: 9px; line-height: 1.5; margin-top: 13px; }
+.recommendation-list { display: grid; gap: 8px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 14px; }
+.recommendation-item { background: #fafbf9; border: 1px solid #edf0ec; border-radius: 7px; padding: 12px; }
+.recommendation-item-top { align-items: flex-start; display: flex; gap: 8px; justify-content: space-between; }
+.recommendation-item h3 { color: #405347; font-size: 10px; line-height: 1.45; }
+.recommendation-priority { border-radius: 10px; flex: 0 0 auto; font-size: 7px; padding: 4px 6px; text-transform: capitalize; }
+.recommendation-priority.high { background: #faeee9; color: #a36455; }
+.recommendation-priority.medium { background: #fbf4e8; color: #9c7d4d; }
+.recommendation-priority.low { background: #edf5ef; color: #5d8a68; }
+.recommendation-item p { color: #7d897f; font-size: 9px; line-height: 1.6; margin-top: 8px; }
+.recommendation-item p strong { color: #56665b; }
+.recommendation-item-label { overflow-wrap: anywhere; }
+.recommendation-footnote { color: #939d95; font-size: 8px; line-height: 1.6; margin-top: 12px; }
 .analysis-note-strip { align-items: center; background: #f7faf7; border: 1px solid #e8eee8; border-radius: 7px; color: #87948a; display: flex; flex-wrap: wrap; font-size: 9px; gap: 8px; margin: 9px 0 14px; padding: 10px 12px; }
 .analysis-note-strip strong { color: #4b6a53; font-size: 11px; }
 .analysis-note-strip span:last-child { margin-left: auto; }
+.statistical-analysis-panel { margin-top: 16px; padding: 19px; }
+.statistical-heading { align-items: center; }
+.statistical-heading h2 { color: #304036; font: 700 13px "Segoe UI", sans-serif; }
+.statistical-heading p { color: #8d9990; font-size: 9px; margin-top: 4px; }
+.statistics-currency { align-items: center; color: #87948a; display: flex; font-size: 9px; gap: 7px; }
+.statistics-currency select { background: white; border: 1px solid #dfe7df; border-radius: 5px; color: #4a6552; font-size: 9px; padding: 6px 8px; }
+.statistics-scope { color: #849087; font-size: 9px; line-height: 1.6; margin-top: 13px; }
+.statistics-subsection { margin-top: 20px; }
+.statistics-subheading { align-items: baseline; display: flex; flex-wrap: wrap; gap: 7px 12px; margin-bottom: 9px; }
+.statistics-subheading h3 { color: #435248; font-size: 10px; font-weight: 700; }
+.statistics-subheading span { color: #939d95; font-size: 8px; }
+.statistics-table-wrap { border: 1px solid #edf0ec; border-radius: 6px; overflow-x: auto; }
+.statistics-table { border-collapse: collapse; font-size: 9px; min-width: 860px; text-align: right; width: 100%; }
+.statistics-table th, .statistics-table td { border-bottom: 1px solid #edf0ec; padding: 10px 9px; white-space: nowrap; }
+.statistics-table thead th { background: #f8faf8; color: #78857b; font-size: 8px; font-weight: 700; }
+.statistics-table tbody th { color: #4b5c50; font-size: 9px; font-weight: 600; text-align: left; }
+.statistics-table td { color: #657369; font-variant-numeric: tabular-nums; }
+.statistics-table tbody tr:last-child th, .statistics-table tbody tr:last-child td { border-bottom: 0; }
+.correlation-table { min-width: 500px; }
+.correlation-table td { color: #376c50; font-weight: 600; }
+.correlation-table td small { color: #9aa39c; display: block; font-size: 7px; font-weight: 400; margin-top: 3px; }
+.statistics-method-note { color: #939d95; font-size: 8px; line-height: 1.65; margin-top: 13px; }
 .additional-analysis-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .attribute-coverage { color: #89958c; font-size: 9px; line-height: 1.6; margin-top: 12px; }
 .balance-projection-panel { margin-top: 14px; padding: 18px; }
@@ -377,6 +421,14 @@ td.amount-cell.outflow { color: #ad7953; }
   .flow-panel, .readiness-panel { padding: 14px 12px; }
   .analysis-grid { grid-template-columns: 1fr; }
   .additional-analysis-grid { grid-template-columns: 1fr; }
+  .statistical-analysis-panel { padding: 14px 12px; }
+  .statistical-heading { align-items: flex-start; }
+  .recommendation-heading { align-items: flex-start; flex-wrap: wrap; }
+  .recommendation-copy { flex: 1 1 calc(100% - 48px); }
+  .recommendation-heading .button { font-size: 9px; gap: 6px; min-height: 34px; padding: 0 9px; width: auto; }
+  .recommendation-list { grid-template-columns: 1fr; }
+  .statistics-table { min-width: 820px; }
+  .correlation-table { min-width: 460px; }
   .model-score-list > div { align-items: flex-start; grid-template-columns: 1fr 1fr; }
   .analysis-flow-panel, .category-analysis { min-height: 260px; padding: 14px 12px; }
   .model-forecast-grid { grid-template-columns: 1fr; }

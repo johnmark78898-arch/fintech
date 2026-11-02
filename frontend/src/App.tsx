@@ -38,6 +38,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { describe, pearsonCorrelation, type NumericVariable } from "./statistics";
 
 type View = "overview" | "transactions" | "analysis" | "forecast" | "documents" | "assistant" | "models";
 
@@ -60,6 +61,7 @@ type Transaction = {
   invoice_month?: string;
   invoice_weekday?: string;
   invoice_hour?: number;
+  numeric_attributes?: Record<string, number | undefined>;
 };
 
 type DatasetContext = {
@@ -109,6 +111,60 @@ type GroundedAnswer = {
   data_based: boolean;
   model: string;
 };
+
+type BusinessRecommendation = {
+  title: string;
+  observation: string;
+  why_it_matters: string;
+  action: string;
+  priority: "high" | "medium" | "low";
+  item?: string | null;
+};
+
+type RecommendationItemSummary = {
+  item: string;
+  currency: string;
+  transactions: number;
+  inflow: number;
+  outflow: number;
+  quantity?: number;
+  sales_count?: number;
+  units_sold?: number;
+  return_count?: number;
+  peer_product_count?: number;
+  peer_median_units_sold?: number;
+};
+
+type RecommendationResult = {
+  recommendations: BusinessRecommendation[];
+  abstained: boolean;
+  model: string;
+  notice?: string | null;
+};
+
+function isRecommendationResult(value: unknown): value is RecommendationResult {
+  if (typeof value !== "object" || value === null || !("recommendations" in value) || !("abstained" in value) || !("model" in value)) {
+    return false;
+  }
+  return Array.isArray(value.recommendations)
+    && value.recommendations.every((item) =>
+      typeof item === "object"
+      && item !== null
+      && "title" in item
+      && typeof item.title === "string"
+      && "observation" in item
+      && typeof item.observation === "string"
+      && "why_it_matters" in item
+      && typeof item.why_it_matters === "string"
+      && "action" in item
+      && typeof item.action === "string"
+      && (!("item" in item) || item.item === null || typeof item.item === "string")
+      && "priority" in item
+      && (item.priority === "high" || item.priority === "medium" || item.priority === "low"))
+    && typeof value.abstained === "boolean"
+    && typeof value.model === "string"
+    && (!("notice" in value) || value.notice === null || typeof value.notice === "string");
+}
 
 function isGroundedAnswer(value: unknown): value is GroundedAnswer {
   if (typeof value !== "object" || value === null || !("answer" in value) || !("citations" in value)) return false;
@@ -166,6 +222,12 @@ function formatTransactionAmount(value: number, currency: string) {
   return formatMoney(value, currency, 2);
 }
 
+function formatStatistic(value: number | null) {
+  return value === null
+    ? "—"
+    : new Intl.NumberFormat("en-GB", { maximumSignificantDigits: 5 }).format(value);
+}
+
 type ParsedCsv = {
   transactions: Transaction[];
   notes: string[];
@@ -218,8 +280,16 @@ function parseNumericAttribute(value: string | undefined) {
 
 function inferDateColumn(fields: string[], rows: Record<string, string>[]) {
   return fields.find((field) => {
-    const values = rows.slice(0, 50).map((row) => row[field]?.trim()).filter((value) => value && !/^\d+$/.test(value));
-    return values.length > 0 && values.filter((value) => Number.isFinite(Date.parse(value))).length / values.length >= 0.8;
+    const values = rows.slice(0, 50).map((row) => row[field]?.trim()).filter((value) => Boolean(value));
+    const dateLike = values.filter((value) =>
+      /^\d{4}[-/]\d{1,2}[-/]\d{1,2}\b/.test(value)
+      || /^\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\b/.test(value)
+      || /^[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}\b/.test(value)
+      || /^\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}\b/.test(value),
+    );
+    return dateLike.length > 0
+      && dateLike.length / values.length >= 0.8
+      && dateLike.every((value) => Number.isFinite(Date.parse(value)));
   });
 }
 
@@ -305,16 +375,31 @@ function parseCsv(text: string): Promise<ParsedCsv> {
           const values = rows.slice(0, 50).map((row) => row[field]?.trim()).filter(Boolean);
           return values.length > 0 && values.filter((value) => parseAmount(value) === null && !Number.isFinite(Date.parse(value))).length / values.length >= 0.5;
         });
+        const numericFields = headers.filter((field) => {
+          if (reservedFields.has(field) || field === descriptionField) return false;
+          const normalized = normalizeHeader(field);
+          if (/^(id|.*id|.*number|.*code|.*reference|.*account|.*date|.*time|.*phone|.*zip|.*postal)$/.test(normalized)) return false;
+          const values = rows.slice(0, 1000).map((row) => row[field]?.trim() ?? "").filter(Boolean);
+          return values.length >= 3
+            && values.filter((value) => parseNumericAttribute(value) !== undefined).length / values.length >= 0.8;
+        });
         const notes: string[] = [];
         if (!namedAmountField && amountField) notes.push(`Amount values were inferred from “${amountField}”; verify the selected values.`);
-        if (!dateField) notes.push("No date column found; imported rows will show “Not provided” and won’t appear in the timeline.");
+        if (!dateField) notes.push("No date column found; rows still appear in statistical and category analysis, but not in time-based charts.");
         if (!accountField) notes.push("No account column found; rows use “Imported account”.");
-        if (!currencyField) notes.push("No currency column found; currency is marked unknown and amounts are not converted.");
-        if (amountField && !directionField && !debitField && !creditField
-          && rows.some((row) => parseAmount(row[amountField])?.direction === "inflow")) {
-          notes.push("Positive amounts are treated as inflows and negative amounts as outflows; check this matches your file.");
+        const missingCurrencyRows = rows.filter((row) => {
+          const value = currencyField ? row[currencyField]?.trim().toUpperCase() ?? "" : "";
+          return !/^[A-Z]{3}$/.test(value);
+        }).length;
+        if (missingCurrencyRows) {
+          notes.push(currencyField
+            ? `${missingCurrencyRows} row${missingCurrencyRows === 1 ? " has" : "s have"} no valid currency; USD is assumed for those rows without conversion. Verify this default.`
+            : "No currency column found; USD is assumed for all rows without conversion. Verify this default.");
         }
-
+        if (!categoryField) notes.push("No category column found; rows are grouped as “Uncategorized” where a category is needed.");
+        if (!directionField && !debitField && !creditField) {
+          notes.push("Transaction direction is inferred from the amount sign; positive is inflow and negative is outflow.");
+        }
         let skippedRows = 0;
         const transactions = rows.flatMap((row, index) => {
           const amount = amountField ? parseAmount(row[amountField]) : null;
@@ -338,7 +423,7 @@ function parseCsv(text: string): Promise<ParsedCsv> {
           const rawDate = dateField ? row[dateField]?.trim() ?? "" : "";
           const date = rawDate && Number.isFinite(Date.parse(rawDate)) ? new Date(rawDate).toISOString() : "";
           const rawCurrency = currencyField ? row[currencyField]?.trim().toUpperCase() ?? "" : "";
-          const currency = /^[A-Z]{3}$/.test(rawCurrency) ? rawCurrency : "XXX";
+          const currency = /^[A-Z]{3}$/.test(rawCurrency) ? rawCurrency : "USD";
           return [{
             occurred_at: date,
             account_name: accountField ? row[accountField]?.trim() || "Imported account" : "Imported account",
@@ -346,7 +431,7 @@ function parseCsv(text: string): Promise<ParsedCsv> {
             currency,
             direction,
             description: (descriptionField ? row[descriptionField]?.trim() : "") || `Imported transaction ${index + 1}`,
-            category: categoryField ? row[categoryField]?.trim() ?? "" : "",
+            category: categoryField ? row[categoryField]?.trim() || "Uncategorized" : "Uncategorized",
             external_ref: (referenceField ? row[referenceField]?.trim() : "") || String(index + 1),
             invoice_id: invoiceField ? row[invoiceField]?.trim().slice(0, 100) : undefined,
             product_code: productField ? row[productField]?.trim().slice(0, 100) : undefined,
@@ -360,6 +445,10 @@ function parseCsv(text: string): Promise<ParsedCsv> {
             invoice_month: invoiceMonthField ? row[invoiceMonthField]?.trim().slice(0, 20) : undefined,
             invoice_weekday: weekdayField ? row[weekdayField]?.trim().slice(0, 20) : undefined,
             invoice_hour: invoiceHourField ? parseNumericAttribute(row[invoiceHourField]) : undefined,
+            numeric_attributes: Object.fromEntries(numericFields.map((field) => [
+              field,
+              parseNumericAttribute(row[field]),
+            ])),
           }];
         });
         if (!transactions.length) {
@@ -545,6 +634,93 @@ function App() {
       ),
     };
   }, [sourceKind, sourceName, transactions]);
+  const recommendationItems = useMemo<RecommendationItemSummary[]>(() => {
+    const grouped = new Map<string, RecommendationItemSummary & { quantityCount: number }>();
+    for (const row of transactions) {
+      const label = (row.product_code?.trim() || row.description.trim()).slice(0, 120);
+      if (!label || /^Imported transaction \d+$/i.test(label)) continue;
+      const amount = Number(row.amount);
+      if (!Number.isFinite(amount)) continue;
+      const key = `${row.currency}:${label}`;
+      const summary = grouped.get(key) ?? {
+        item: label,
+        currency: row.currency,
+        transactions: 0,
+        inflow: 0,
+        outflow: 0,
+        quantity: 0,
+        quantityCount: 0,
+        sales_count: 0,
+        units_sold: 0,
+        return_count: 0,
+      };
+      summary.transactions += 1;
+      summary[row.direction] += Math.abs(amount);
+      if (Number.isFinite(row.quantity)) {
+        summary.quantity = (summary.quantity ?? 0) + (row.quantity ?? 0);
+        summary.quantityCount += 1;
+        if ((row.quantity ?? 0) < 0 || row.is_return === true) {
+          summary.return_count = (summary.return_count ?? 0) + 1;
+        } else if ((row.quantity ?? 0) > 0) {
+          summary.sales_count = (summary.sales_count ?? 0) + 1;
+          summary.units_sold = (summary.units_sold ?? 0) + (row.quantity ?? 0);
+        }
+      }
+      grouped.set(key, summary);
+    }
+    const summaries = Array.from(grouped.values()).map(({ quantityCount, ...summary }) => ({
+      ...summary,
+      quantity: quantityCount === summary.transactions ? summary.quantity : undefined,
+    }));
+    const unitsSoldByCurrency = new Map<string, number[]>();
+    for (const summary of summaries) {
+      if (summary.quantity === undefined || (summary.units_sold ?? 0) <= 0) continue;
+      const unitsSold = unitsSoldByCurrency.get(summary.currency) ?? [];
+      unitsSold.push(summary.units_sold ?? 0);
+      unitsSoldByCurrency.set(summary.currency, unitsSold);
+    }
+    const peerContextByCurrency = new Map(Array.from(unitsSoldByCurrency, ([currencyCode, units]) => {
+      const sortedUnits = units.sort((left, right) => left - right);
+      const middle = Math.floor(sortedUnits.length / 2);
+      const medianUnits = sortedUnits.length
+        ? sortedUnits.length % 2
+          ? sortedUnits[middle]
+          : (sortedUnits[middle - 1] + sortedUnits[middle]) / 2
+        : undefined;
+      return [currencyCode, { medianUnits, productCount: sortedUnits.length }] as const;
+    }));
+    const withPeerContext = summaries.map((summary) => {
+      const peerContext = peerContextByCurrency.get(summary.currency);
+      return {
+        ...summary,
+        peer_product_count: peerContext?.productCount ?? 0,
+        peer_median_units_sold: peerContext?.medianUnits,
+      };
+    });
+    const lowSelling = withPeerContext
+      .filter((summary) =>
+        summary.quantity !== undefined
+        && (summary.units_sold ?? 0) > 0
+        && (summary.peer_product_count ?? 0) >= 5
+        && summary.peer_median_units_sold !== undefined
+        && (summary.units_sold ?? 0) <= summary.peer_median_units_sold / 2,
+      )
+      .sort((left, right) =>
+        (left.units_sold ?? 0) - (right.units_sold ?? 0)
+        || left.item.localeCompare(right.item),
+      )
+      .slice(0, 5);
+    const highestActivity = [...withPeerContext]
+      .sort((left, right) =>
+        right.inflow + right.outflow - (left.inflow + left.outflow)
+        || left.item.localeCompare(right.item),
+      )
+      .slice(0, 5);
+    return Array.from(new Map([...lowSelling, ...highestActivity].map((summary) => [
+      `${summary.currency}:${summary.item}`,
+      summary,
+    ])).values()).slice(0, 10);
+  }, [transactions]);
 
   const { modelSeries, modelInterval } = useMemo(() => {
     if (currencies.size !== 1 || unknownCurrency) {
@@ -631,7 +807,7 @@ function App() {
       setTrendRun(null);
       setSourceName(file.name);
       setSourceKind("local");
-      setActiveView("transactions");
+      setActiveView("analysis");
       const importNotes = notes.length ? ` Import notes: ${notes.join(" ")}` : "";
       setNotice(`${rows.length.toLocaleString()} rows loaded in this browser for preview only.${importNotes}`);
     } catch (reason) {
@@ -765,6 +941,8 @@ function App() {
               categories={datasetContext.categories}
               chartData={chartData}
               currency={currency}
+              dataset={datasetContext}
+              recommendationItems={recommendationItems}
               mixedCurrency={mixedCurrency}
               sourceKind={sourceKind}
               sourceName={sourceName}
@@ -921,7 +1099,7 @@ function Overview(props: OverviewProps) {
                   </defs>
                   <CartesianGrid stroke="#edf0ec" vertical={false} />
                   <XAxis dataKey="month" axisLine={false} tickLine={false} tick={{ fill: "#98a29b", fontSize: 11 }} dy={10} />
-                  <YAxis axisLine={false} tickLine={false} tick={{ fill: "#98a29b", fontSize: 11 }} tickFormatter={(value: number) => `£${Math.round(value / 1000)}k`} width={42} />
+                  <YAxis axisLine={false} tickLine={false} tick={{ fill: "#98a29b", fontSize: 11 }} tickFormatter={(value: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: currency ?? "USD", notation: "compact", maximumFractionDigits: 0 }).format(value)} width={50} />
                   <Tooltip
                     contentStyle={{ border: "1px solid #e8ece8", borderRadius: 10, boxShadow: "0 8px 24px #17251d12" }}
                     formatter={(value) => formatMoney(Number(value), currency ?? "GBP")}
@@ -1069,12 +1247,14 @@ function TransactionsView({
 }
 
 function AnalysisView({
-  categories, chartData, currency, mixedCurrency, sourceKind, sourceName, transactions, transactionCount,
+  categories, chartData, currency, dataset, recommendationItems, mixedCurrency, sourceKind, sourceName, transactions, transactionCount,
   undatedCount, unknownCurrency, totals,
 }: {
   categories: DatasetContext["categories"];
   chartData: { month: string; inflow: number; outflow: number }[];
   currency: string | null;
+  dataset: DatasetContext;
+  recommendationItems: RecommendationItemSummary[];
   mixedCurrency: boolean;
   sourceKind: "demo" | "local";
   sourceName: string;
@@ -1084,6 +1264,123 @@ function AnalysisView({
   unknownCurrency: boolean;
   totals: { inflow: number; outflow: number };
 }) {
+  const [recommendations, setRecommendations] = useState<RecommendationResult | null>(null);
+  const [recommendationError, setRecommendationError] = useState("");
+  const [generatingRecommendations, setGeneratingRecommendations] = useState(false);
+  useEffect(() => {
+    setRecommendations(null);
+    setRecommendationError("");
+  }, [dataset]);
+
+  async function generateRecommendations() {
+    setRecommendations(null);
+    setRecommendationError("");
+    setGeneratingRecommendations(true);
+    try {
+      const response = await fetch("/api/v1/recommendations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dataset, items: recommendationItems }),
+      });
+      const payload: unknown = await response.json();
+      if (!response.ok) {
+        const detail = typeof payload === "object" && payload !== null && "detail" in payload && typeof payload.detail === "string"
+          ? payload.detail
+          : "The local recommendation service is unavailable.";
+        throw new Error(detail);
+      }
+      if (!isRecommendationResult(payload)) {
+        throw new Error("The recommendation service returned an invalid response.");
+      }
+      setRecommendations(payload);
+    } catch (reason) {
+      setRecommendationError(reason instanceof Error ? reason.message : "Recommendations could not be generated.");
+    } finally {
+      setGeneratingRecommendations(false);
+    }
+  }
+
+  const availableCurrencies = Array.from(new Set(transactions.map((row) => row.currency)));
+  const [requestedStatisticsCurrency, setRequestedStatisticsCurrency] = useState(currency ?? availableCurrencies[0] ?? "XXX");
+  const statisticsCurrency = availableCurrencies.includes(requestedStatisticsCurrency)
+    ? requestedStatisticsCurrency
+    : currency && availableCurrencies.includes(currency)
+      ? currency
+      : availableCurrencies[0] ?? "XXX";
+  const statisticalTransactions = transactions.filter((row) => row.currency === statisticsCurrency);
+  const numericVariables: NumericVariable[] = [
+    {
+      id: "amount",
+      label: "Signed transaction amount",
+      values: statisticalTransactions.map((row) => {
+        const amount = Number(row.amount);
+        return Number.isFinite(amount) ? (row.direction === "outflow" ? -amount : amount) : null;
+      }),
+    },
+    {
+      id: "quantity",
+      label: "Quantity",
+      values: statisticalTransactions.map((row) => Number.isFinite(row.quantity) ? row.quantity ?? null : null),
+    },
+    {
+      id: "unit-price",
+      label: "Unit price",
+      values: statisticalTransactions.map((row) => Number.isFinite(row.unit_price) ? row.unit_price ?? null : null),
+    },
+    {
+      id: "line-total",
+      label: "Line total",
+      values: statisticalTransactions.map((row) => Number.isFinite(row.line_total) ? row.line_total ?? null : null),
+    },
+    ...Array.from(new Set(statisticalTransactions.flatMap((row) =>
+      Object.keys(row.numeric_attributes ?? {}),
+    ))).map((field) => ({
+      id: `csv-${field}`,
+      label: field,
+      values: statisticalTransactions.map((row) => {
+        const value = row.numeric_attributes?.[field];
+        return value !== undefined && Number.isFinite(value) ? value : null;
+      }),
+    })),
+  ];
+  const descriptiveSummaries = numericVariables.map((variable) => ({
+    variable,
+    statistics: describe(variable.values),
+  }));
+  const correlationVariables = descriptiveSummaries
+    .filter(({ statistics }) => statistics && statistics.count >= 3)
+    .map(({ variable }) => variable);
+  const correlationMatrix = correlationVariables.map((rowVariable, rowIndex) => ({
+    variable: rowVariable,
+    cells: correlationVariables.map((columnVariable, columnIndex) => rowIndex === columnIndex
+      ? { coefficient: 1, count: describe(rowVariable.values)?.count ?? 0 }
+      : pearsonCorrelation(rowVariable.values, columnVariable.values)),
+  }));
+  const amountValues = numericVariables[0].values.filter((value): value is number => value !== null);
+  const minimumAmount = amountValues.reduce((minimum, amount) => Math.min(minimum, amount), Infinity);
+  const maximumAmount = amountValues.reduce((maximum, amount) => Math.max(maximum, amount), -Infinity);
+  const distributionBinCount = amountValues.length
+    ? Math.min(12, Math.max(1, Math.ceil(Math.sqrt(amountValues.length))))
+    : 0;
+  const binWidth = distributionBinCount && maximumAmount > minimumAmount
+    ? (maximumAmount - minimumAmount) / distributionBinCount
+    : 0;
+  const amountDistribution = Array.from({ length: distributionBinCount }, (_, index) => {
+    const lower = binWidth ? minimumAmount + index * binWidth : minimumAmount;
+    const upper = binWidth ? minimumAmount + (index + 1) * binWidth : maximumAmount;
+    return {
+      range: binWidth
+        ? `${formatTransactionAmount(lower, statisticsCurrency)}–${formatTransactionAmount(upper, statisticsCurrency)}`
+        : formatTransactionAmount(lower, statisticsCurrency),
+      transactions: 0,
+    };
+  });
+  for (const amount of amountValues) {
+    const index = binWidth
+      ? Math.min(distributionBinCount - 1, Math.floor((amount - minimumAmount) / binWidth))
+      : 0;
+    amountDistribution[index].transactions += 1;
+  }
   const invoiceIds = new Set(transactions.map((row) => row.invoice_id).filter((value): value is string => Boolean(value)));
   const products = new Set(transactions.map((row) => row.product_code).filter((value): value is string => Boolean(value)));
   const countries = new Set(transactions.map((row) => row.country).filter((value): value is string => Boolean(value)));
@@ -1216,12 +1513,182 @@ function AnalysisView({
         <MetricCard label="Quantity sum" value={quantifiedRows.length ? new Intl.NumberFormat("en-GB", { maximumFractionDigits: 2 }).format(quantitySum) : "—"} change={quantifiedRows.length ? `${quantifiedRows.length.toLocaleString()} rows include quantity` : "No quantity column detected"} icon={Activity} tone="purple" />
         <MetricCard label="Return rows" value={returnRows ? returnRows.toLocaleString() : "—"} change={returnRows ? "Explicit return flag" : "No explicit return flag"} icon={ArrowDownRight} tone="orange" />
       </section>
+      <section className="panel recommendation-panel" aria-live="polite">
+        <div className="recommendation-heading">
+          <div className="recommendation-icon"><Sparkles size={17} /></div>
+          <div className="recommendation-copy">
+            <h2>Business recommendations</h2>
+            <p>Get plain-language review steps from your totals and products, including cautious promotion ideas when sales data supports them.</p>
+          </div>
+          <button
+            className="button button-primary"
+            disabled={generatingRecommendations || !dataset.transaction_count}
+            onClick={() => void generateRecommendations()}
+            type="button"
+          >
+            {generatingRecommendations ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />}
+            {recommendations ? "Refresh recommendations" : "Generate recommendations"}
+          </button>
+        </div>
+        {sourceKind === "demo" && (
+          <p className="recommendation-notice">This demo contains retail sales and returns, not business bank activity or cash flow. Treat suggestions as exploratory only.</p>
+        )}
+        {recommendations?.notice && <p className="recommendation-notice" role="status">{recommendations.notice}</p>}
+        {recommendationError && <p className="recommendation-error" role="alert">{recommendationError}</p>}
+        {generatingRecommendations && <p className="recommendation-loading" role="status">Generating suggestions with the local model from summary data…</p>}
+        {recommendations && (
+          recommendations.abstained || !recommendations.recommendations.length
+            ? <p className="recommendation-loading">There is not enough information in this transaction summary to make a grounded recommendation.</p>
+            : (
+              <>
+                <div className="recommendation-list">
+                  {recommendations.recommendations.map((item, index) => (
+                    <article className="recommendation-item" key={`${item.title}-${index}`}>
+                      <div className="recommendation-item-top">
+                        <h3>{item.title}</h3>
+                        <span className={`recommendation-priority ${item.priority}`}>{item.priority === "high" ? "Start here" : item.priority === "medium" ? "Worth checking" : "Optional review"}</span>
+                      </div>
+                      {item.item && <p className="recommendation-item-label"><strong>Item to review:</strong> {item.item}</p>}
+                      <p><strong>What the CSV shows:</strong> {item.observation}</p>
+                      <p><strong>Why it may matter:</strong> {item.why_it_matters}</p>
+                      <p><strong>A practical next step:</strong> {item.action}</p>
+                    </article>
+                  ))}
+                </div>
+                <p className="recommendation-footnote">Generated by {recommendations.model} using totals, monthly/category summaries, and up to 10 item-label summaries. Suggestions are for human review, not financial advice or guaranteed outcomes.</p>
+              </>
+            )
+        )}
+        {!recommendations && !recommendationError && !generatingRecommendations && (
+          <p className="recommendation-footnote">Your configured local Ollama model receives aggregate summaries and up to 10 named item labels with totals. Raw rows and full descriptions stay in the browser.</p>
+        )}
+      </section>
       {averageUnitPrice !== null && currency && (
         <section className="analysis-note-strip">
           <span>Average unit price</span><strong>{formatMoney(averageUnitPrice, currency, 2)}</strong>
           <span>{currenciesWithPrices.length.toLocaleString()} rows include unit-price data.</span>
         </section>
       )}
+      <section className="panel statistical-analysis-panel">
+        <div className="panel-heading statistical-heading">
+          <div><h2>Statistical analysis</h2><p>Univariate summaries and multivariate numeric associations · calculated locally in your browser</p></div>
+          {availableCurrencies.length > 1 ? (
+            <label className="statistics-currency">
+              <span>Currency</span>
+              <select
+                aria-label="Currency for statistical analysis"
+                onChange={(event) => setRequestedStatisticsCurrency(event.target.value)}
+                value={statisticsCurrency}
+              >
+                {availableCurrencies.map((code) => <option key={code} value={code}>{code}</option>)}
+              </select>
+            </label>
+          ) : (
+            <span className="banner-tag">{statisticsCurrency}</span>
+          )}
+        </div>
+        <p className="statistics-scope">
+          Using {statisticalTransactions.length.toLocaleString()} {statisticsCurrency === "XXX" ? "rows with unknown currency" : `${statisticsCurrency} rows`}. Transaction amount is signed (inflows positive, outflows negative); amount, unit price, and line total are expressed in the selected currency.
+        </p>
+        <div className="statistics-subsection">
+          <div className="statistics-subheading"><h3>Univariate descriptive statistics</h3><span>Sample standard deviation and variance</span></div>
+          <div className="statistics-table-wrap">
+            <table className="statistics-table">
+              <thead>
+                <tr>
+                  <th scope="col">Variable</th>
+                  <th scope="col">N</th>
+                  <th scope="col">Mean</th>
+                  <th scope="col">Median</th>
+                  <th scope="col">Std. dev.</th>
+                  <th scope="col">Variance</th>
+                  <th scope="col">Min</th>
+                  <th scope="col">Q1</th>
+                  <th scope="col">Q3</th>
+                  <th scope="col">Max</th>
+                  <th scope="col">Skewness</th>
+                </tr>
+              </thead>
+              <tbody>
+                {descriptiveSummaries.map(({ variable, statistics }) => (
+                  <tr key={variable.id}>
+                    <th scope="row">{variable.label}</th>
+                    <td>{statistics?.count.toLocaleString() ?? "0"}</td>
+                    <td>{statistics ? formatStatistic(statistics.mean) : "—"}</td>
+                    <td>{statistics ? formatStatistic(statistics.median) : "—"}</td>
+                    <td>{statistics ? formatStatistic(statistics.standardDeviation) : "—"}</td>
+                    <td>{statistics ? formatStatistic(statistics.variance) : "—"}</td>
+                    <td>{statistics ? formatStatistic(statistics.minimum) : "—"}</td>
+                    <td>{statistics ? formatStatistic(statistics.firstQuartile) : "—"}</td>
+                    <td>{statistics ? formatStatistic(statistics.thirdQuartile) : "—"}</td>
+                    <td>{statistics ? formatStatistic(statistics.maximum) : "—"}</td>
+                    <td>{statistics ? formatStatistic(statistics.skewness) : "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div className="statistics-subsection">
+          <div className="statistics-subheading">
+            <h3>Multivariate Pearson correlation</h3>
+            <span>Pairwise complete observations · coefficients range from −1 to +1</span>
+          </div>
+          {correlationVariables.length >= 2 ? (
+            <div className="statistics-table-wrap">
+              <table className="statistics-table correlation-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Variable</th>
+                    {correlationVariables.map((variable) => <th scope="col" key={variable.id}>{variable.label}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {correlationMatrix.map(({ variable, cells }) => (
+                    <tr key={variable.id}>
+                      <th scope="row">{variable.label}</th>
+                      {cells.map((cell, index) => (
+                        <td
+                          key={correlationVariables[index].id}
+                          title={`${cell.count.toLocaleString()} pairwise complete observations`}
+                        >
+                          {cell.coefficient === null ? "—" : cell.coefficient.toFixed(3)}
+                          <small>n={cell.count.toLocaleString()}</small>
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="inline-notice">At least two numeric variables with three or more observations each are needed to calculate correlations.</div>
+          )}
+        </div>
+        <p className="statistics-method-note">
+          Missing values are excluded separately for each variable or variable pair. Quartiles use linear interpolation; skewness is adjusted Fisher–Pearson sample skewness. Correlation describes linear association, not causation, and no significance test is performed.
+        </p>
+      </section>
+      <section className="panel category-analysis analysis-chart-panel statistical-distribution-panel">
+        <div className="panel-heading">
+          <div><h2>Transaction amount distribution</h2><p>Signed amounts · {statisticsCurrency} · {amountValues.length.toLocaleString()} rows</p></div>
+        </div>
+        {amountDistribution.length ? (
+          <div className="chart-wrap">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={amountDistribution} margin={{ top: 12, right: 8, left: 0, bottom: 12 }}>
+                <CartesianGrid stroke="#edf0ec" vertical={false} />
+                <XAxis dataKey="range" interval="preserveStartEnd" axisLine={false} tickLine={false} tick={{ fill: "#98a29b", fontSize: 8 }} angle={-15} textAnchor="end" height={42} />
+                <YAxis allowDecimals={false} axisLine={false} tickLine={false} tick={{ fill: "#98a29b", fontSize: 9 }} width={38} />
+                <Tooltip />
+                <Bar dataKey="transactions" name="Transactions" fill="#5da47b" radius={[3, 3, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        ) : (
+          <div className="empty-chart"><span>No valid amounts available to chart.</span></div>
+        )}
+      </section>
       <div className="analysis-grid">
         <section className="panel flow-panel analysis-flow-panel">
           <div className="panel-heading"><div><h2>Monthly transaction activity</h2><p>Inflows and outflows · {sourceName}</p></div></div>

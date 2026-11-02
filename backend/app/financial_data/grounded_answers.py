@@ -14,14 +14,12 @@ class OllamaInvalidResponse(RuntimeError):
     pass
 
 
-def generate_ollama_answer(
-    question: str,
-    passages: list[dict[str, Any]],
+def _request_ollama_json(
+    request_body: dict[str, Any],
     *,
     base_url: str,
     model: str,
-    dataset_context: dict[str, Any] | None = None,
-) -> tuple[str, list[str], bool]:
+) -> dict[str, Any]:
     parsed_url = urlsplit(base_url)
     if (
         parsed_url.scheme != "http"
@@ -33,6 +31,44 @@ def generate_ollama_answer(
     if not re.fullmatch(r"[A-Za-z0-9._:-]{1,100}", model):
         raise ValueError("The configured Ollama model name is invalid")
 
+    request = Request(
+        f"{base_url.rstrip('/')}/api/chat",
+        data=json.dumps(request_body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=60) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as error:
+        raise OllamaUnavailable(f"Ollama returned HTTP {error.code}") from error
+    except (URLError, TimeoutError, OSError) as error:
+        raise OllamaUnavailable("Could not reach the local Ollama service") from error
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise OllamaInvalidResponse("Ollama returned an invalid response") from error
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("message"), dict):
+        raise OllamaInvalidResponse("Ollama response did not contain a message")
+    content = payload["message"].get("content")
+    if not isinstance(content, str):
+        raise OllamaInvalidResponse("Ollama response did not contain a message")
+    try:
+        result = json.loads(content)
+    except json.JSONDecodeError as error:
+        raise OllamaInvalidResponse("Ollama did not return valid answer JSON") from error
+    if not isinstance(result, dict):
+        raise OllamaInvalidResponse("Ollama JSON response must be an object")
+    return result
+
+
+def generate_ollama_answer(
+    question: str,
+    passages: list[dict[str, Any]],
+    *,
+    base_url: str,
+    model: str,
+    dataset_context: dict[str, Any] | None = None,
+) -> tuple[str, list[str], bool]:
     evidence = [
         {
             "citation_id": passage["chunk_id"],
@@ -84,34 +120,10 @@ def generate_ollama_answer(
             },
         ],
     }
-    request = Request(
-        f"{base_url.rstrip('/')}/api/chat",
-        data=json.dumps(request_body).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urlopen(request, timeout=60) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except HTTPError as error:
-        raise OllamaUnavailable(f"Ollama returned HTTP {error.code}") from error
-    except (URLError, TimeoutError, OSError) as error:
-        raise OllamaUnavailable("Could not reach the local Ollama service") from error
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise OllamaInvalidResponse("Ollama returned an invalid response") from error
-
-    if not isinstance(payload, dict) or not isinstance(payload.get("message"), dict):
-        raise OllamaInvalidResponse("Ollama response did not contain a message")
-    content = payload["message"].get("content")
-    if not isinstance(content, str):
-        raise OllamaInvalidResponse("Ollama response did not contain a message")
-    try:
-        result = json.loads(content)
-    except json.JSONDecodeError as error:
-        raise OllamaInvalidResponse("Ollama did not return valid answer JSON") from error
-    answer = result.get("answer") if isinstance(result, dict) else None
-    citation_ids = result.get("citation_ids") if isinstance(result, dict) else None
-    abstained = result.get("abstained") if isinstance(result, dict) else None
+    result = _request_ollama_json(request_body, base_url=base_url, model=model)
+    answer = result.get("answer")
+    citation_ids = result.get("citation_ids")
+    abstained = result.get("abstained")
     if (
         not isinstance(answer, str)
         or not answer.strip()
