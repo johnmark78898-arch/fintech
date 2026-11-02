@@ -17,6 +17,10 @@ def recommend_from_transactions(request: RecommendationRequest) -> Recommendatio
         recommendations, abstained, used_fallback = generate_ollama_recommendations(
             request.dataset.model_dump(),
             items=[item.model_dump(exclude_none=True) for item in request.items],
+            monthly_categories=[
+                item.model_dump() for item in request.monthly_categories
+            ],
+            monthly_returns=[item.model_dump() for item in request.monthly_returns],
             base_url=settings.ollama_base_url,
             model=settings.ollama_model,
         )

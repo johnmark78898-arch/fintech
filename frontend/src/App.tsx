@@ -118,6 +118,7 @@ type BusinessRecommendation = {
   why_it_matters: string;
   action: string;
   priority: "high" | "medium" | "low";
+  confidence: "high" | "moderate" | "low";
   item?: string | null;
 };
 
@@ -133,6 +134,8 @@ type RecommendationItemSummary = {
   return_count?: number;
   peer_product_count?: number;
   peer_median_units_sold?: number;
+  first_seen_month?: string;
+  last_seen_month?: string;
 };
 
 type RecommendationResult = {
@@ -140,6 +143,21 @@ type RecommendationResult = {
   abstained: boolean;
   model: string;
   notice?: string | null;
+};
+
+type MonthlyCategorySummary = {
+  month: string;
+  category: string;
+  currency: string;
+  outflow: number;
+  transactions: number;
+};
+
+type MonthlyReturnSummary = {
+  month: string;
+  currency: string;
+  sales_count: number;
+  return_count: number;
 };
 
 function isRecommendationResult(value: unknown): value is RecommendationResult {
@@ -158,6 +176,8 @@ function isRecommendationResult(value: unknown): value is RecommendationResult {
       && typeof item.why_it_matters === "string"
       && "action" in item
       && typeof item.action === "string"
+      && "confidence" in item
+      && (item.confidence === "high" || item.confidence === "moderate" || item.confidence === "low")
       && (!("item" in item) || item.item === null || typeof item.item === "string")
       && "priority" in item
       && (item.priority === "high" || item.priority === "medium" || item.priority === "low"))
@@ -531,7 +551,7 @@ function App() {
     };
   }, []);
 
-  const currencies = new Set(transactions.map((row) => row.currency));
+  const currencies = useMemo(() => new Set(transactions.map((row) => row.currency)), [transactions]);
   const currency = currencies.size === 1 && transactions[0]?.currency !== "XXX" ? transactions[0]?.currency ?? null : null;
   const mixedCurrency = currencies.size > 1;
   const unknownCurrency = transactions.some((row) => row.currency === "XXX");
@@ -653,9 +673,21 @@ function App() {
         sales_count: 0,
         units_sold: 0,
         return_count: 0,
+        first_seen_month: undefined,
+        last_seen_month: undefined,
       };
       summary.transactions += 1;
       summary[row.direction] += Math.abs(amount);
+      const occurredAt = row.occurred_at ? new Date(row.occurred_at) : null;
+      if (occurredAt && !Number.isNaN(occurredAt.valueOf())) {
+        const rowMonth = `${occurredAt.getUTCFullYear()}-${String(occurredAt.getUTCMonth() + 1).padStart(2, "0")}`;
+        summary.first_seen_month = !summary.first_seen_month || rowMonth < summary.first_seen_month
+          ? rowMonth
+          : summary.first_seen_month;
+        summary.last_seen_month = !summary.last_seen_month || rowMonth > summary.last_seen_month
+          ? rowMonth
+          : summary.last_seen_month;
+      }
       if (Number.isFinite(row.quantity)) {
         summary.quantity = (summary.quantity ?? 0) + (row.quantity ?? 0);
         summary.quantityCount += 1;
@@ -722,9 +754,9 @@ function App() {
     ])).values()).slice(0, 10);
   }, [transactions]);
 
-  const { modelSeries, modelInterval } = useMemo(() => {
+  const { modelSeries, modelInterval, modelMissingPeriods } = useMemo(() => {
     if (currencies.size !== 1 || unknownCurrency) {
-      return { modelSeries: [], modelInterval: "day" as const };
+      return { modelSeries: [], modelInterval: "day" as const, modelMissingPeriods: 0 };
     }
     const monthly = new Map<string, number>();
     const daily = new Map<string, number>();
@@ -760,6 +792,7 @@ function App() {
     }
     return {
       modelInterval: interval,
+      modelMissingPeriods: filledBuckets.size - buckets.size,
       modelSeries: Array.from(filledBuckets, ([month, net]) => ({
         month,
         net,
@@ -969,6 +1002,10 @@ function App() {
             <ModelsView
               modelSeries={modelSeries}
               modelInterval={modelInterval}
+              modelMissingPeriods={modelMissingPeriods}
+              modelDateCoverage={transactions.length
+                ? (transactions.length - datasetContext.undated_count) / transactions.length
+                : 0}
               onView={setActiveView}
               onTrain={setTrendRun}
               run={trendRun}
@@ -1272,6 +1309,71 @@ function AnalysisView({
     setRecommendationError("");
   }, [dataset]);
 
+  const recommendationHistory = useMemo(() => {
+    const categoryTotals = new Map<string, MonthlyCategorySummary>();
+    const returnTotals = new Map<string, MonthlyReturnSummary>();
+    for (const row of transactions) {
+      const date = row.occurred_at ? new Date(row.occurred_at) : null;
+      if (!date || Number.isNaN(date.valueOf())) continue;
+      const month = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+      const amount = Number(row.amount);
+      if (!Number.isFinite(amount)) continue;
+
+      if (row.direction === "outflow") {
+        const category = row.category.trim().slice(0, 80) || "Uncategorized";
+        const key = `${row.currency}:${month}:${category}`;
+        const summary = categoryTotals.get(key) ?? {
+          month, category, currency: row.currency, outflow: 0, transactions: 0,
+        };
+        summary.outflow += amount;
+        summary.transactions += 1;
+        categoryTotals.set(key, summary);
+      }
+
+      if (typeof row.is_return === "boolean" || (row.quantity !== undefined && Number.isFinite(row.quantity))) {
+        const key = `${row.currency}:${month}`;
+        const summary = returnTotals.get(key) ?? {
+          month, currency: row.currency, sales_count: 0, return_count: 0,
+        };
+        if (row.is_return === true || (row.quantity !== undefined && row.quantity < 0)) {
+          summary.return_count += 1;
+        } else if (
+          row.quantity !== undefined && Number.isFinite(row.quantity)
+            ? row.quantity > 0
+            : row.is_return === false
+        ) {
+          summary.sales_count += 1;
+        }
+        returnTotals.set(key, summary);
+      }
+    }
+
+    const monthlyCategoryCount = new Map<string, number>();
+    const monthlyCategories = Array.from(categoryTotals.values())
+      .sort((left, right) =>
+        left.month.localeCompare(right.month)
+        || left.currency.localeCompare(right.currency)
+        || right.outflow - left.outflow,
+      )
+      .filter((summary) => {
+        const key = `${summary.currency}:${summary.month}`;
+        const count = monthlyCategoryCount.get(key) ?? 0;
+        if (count >= 5) return false;
+        monthlyCategoryCount.set(key, count + 1);
+        return true;
+      })
+      .slice(-6000);
+
+    return {
+      monthly_categories: monthlyCategories,
+      monthly_returns: Array.from(returnTotals.values())
+        .sort((left, right) =>
+          left.month.localeCompare(right.month) || left.currency.localeCompare(right.currency),
+        )
+        .slice(-1200),
+    };
+  }, [transactions]);
+
   async function generateRecommendations() {
     setRecommendations(null);
     setRecommendationError("");
@@ -1280,7 +1382,7 @@ function AnalysisView({
       const response = await fetch("/api/v1/recommendations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dataset, items: recommendationItems }),
+        body: JSON.stringify({ dataset, items: recommendationItems, ...recommendationHistory }),
       });
       const payload: unknown = await response.json();
       if (!response.ok) {
@@ -1518,7 +1620,7 @@ function AnalysisView({
           <div className="recommendation-icon"><Sparkles size={17} /></div>
           <div className="recommendation-copy">
             <h2>Business recommendations</h2>
-            <p>Get plain-language review steps from your totals and products, including cautious promotion ideas when sales data supports them.</p>
+            <p>Get evidence-based review steps from your totals, products, spending history, and return trends. Pricing and inventory decisions remain yours.</p>
           </div>
           <button
             className="button button-primary"
@@ -1548,6 +1650,7 @@ function AnalysisView({
                         <h3>{item.title}</h3>
                         <span className={`recommendation-priority ${item.priority}`}>{item.priority === "high" ? "Start here" : item.priority === "medium" ? "Worth checking" : "Optional review"}</span>
                       </div>
+                      <p className="recommendation-footnote">Evidence confidence: {item.confidence}</p>
                       {item.item && <p className="recommendation-item-label"><strong>Item to review:</strong> {item.item}</p>}
                       <p><strong>What the CSV shows:</strong> {item.observation}</p>
                       <p><strong>Why it may matter:</strong> {item.why_it_matters}</p>
@@ -1555,12 +1658,12 @@ function AnalysisView({
                     </article>
                   ))}
                 </div>
-                <p className="recommendation-footnote">Generated by {recommendations.model} using totals, monthly/category summaries, and up to 10 item-label summaries. Suggestions are for human review, not financial advice or guaranteed outcomes.</p>
+                <p className="recommendation-footnote">Generated by {recommendations.model} using aggregate summaries. Suggestions are for human review, not financial advice or guaranteed outcomes.</p>
               </>
             )
         )}
         {!recommendations && !recommendationError && !generatingRecommendations && (
-          <p className="recommendation-footnote">Your configured local Ollama model receives aggregate summaries and up to 10 named item labels with totals. Raw rows and full descriptions stay in the browser.</p>
+          <p className="recommendation-footnote">Your configured local Ollama model receives aggregate summaries and up to 10 named item labels with totals. Raw rows and full descriptions stay in the browser. Priority and confidence are assigned from deterministic evidence thresholds, not by the model.</p>
         )}
       </section>
       {averageUnitPrice !== null && currency && (
@@ -1858,7 +1961,7 @@ function ForecastView({
           <p>The current UCI demo contains retail invoice lines, not bank movements. Cash flow stays empty until you preview a CSV with dated inflows/outflows and one known currency; retail sales are not treated as cash receipts.</p>
           <div className="requirement-list">
             <div><span className="requirement-number">01</span><span><strong>Use cash movements</strong><small>Include actual receipt/payment amounts, a transaction date, and one currency.</small></span></div>
-            <div><span className="requirement-number">02</span><span><strong>Train and compare</strong><small>Model lab evaluates several baselines on a chronological holdout.</small></span></div>
+            <div><span className="requirement-number">02</span><span><strong>Train and compare</strong><small>Model lab uses rolling validation and a separate final three-period test.</small></span></div>
             <div><span className="requirement-number">03</span><span><strong>Project a balance only with evidence</strong><small>Enter a verified opening balance and confirm the rows are cash flows.</small></span></div>
           </div>
           <button className="button button-primary" onClick={onChooseFile} type="button"><Upload size={15} />Upload cash-flow CSV</button>
@@ -1868,23 +1971,34 @@ function ForecastView({
           <div className="blocked-icon"><BarChart3 size={24} /></div>
           <div className="eyebrow">READY FOR A CASH-FLOW RUN</div>
           <h2>Train a model on the current CSV</h2>
-          <p>Model lab compares a last-period baseline, moving average, and linear trend using a chronological holdout. To project a balance, you’ll also need a verified opening balance and confirmation that these rows represent actual cash receipts/payments.</p>
+          <p>Model lab compares simple baselines using rolling historical validation and a separate final three-period test. To project a balance, you’ll also need a verified opening balance and confirmation that these rows represent actual cash receipts/payments.</p>
           <button className="button button-secondary" onClick={() => onView("models")} type="button">Open model lab <ArrowRight size={15} /></button>
         </section>
       ) : (
         <>
           <section className="panel model-status-panel">
-            <div className="panel-heading"><div><h2>{intervalLabel} transaction-movement estimate</h2><p>{sourceName} · {run.method} selected from {run.scores.length} candidates · {run.holdoutCount} chronological holdout periods</p></div></div>
+            <div className="panel-heading"><div><h2>{intervalLabel} transaction-movement estimate</h2><p>{sourceName} · {run.method} selected on rolling validation · {run.holdoutCount}-period final test</p></div></div>
             <div className="model-facts">
               <div><span>Selected method</span><strong>{run.method}</strong></div>
-              <div><span>Selected holdout MAE</span><strong>{formatMoney(run.mae, modelCurrency, 2)}</strong></div>
-              <div><span>Holdout RMSE</span><strong>{formatMoney(run.rmse, modelCurrency, 2)}</strong></div>
-              <div><span>Symmetric percentage error</span><strong>{run.smape.toFixed(1)}%</strong></div>
+              <div><span>Final test MAE</span><strong>{formatMoney(run.mae, modelCurrency, 2)}</strong></div>
+              <div><span>Final test RMSE</span><strong>{formatMoney(run.rmse, modelCurrency, 2)}</strong></div>
+              <div><span>Final test sMAPE</span><strong>{run.smape.toFixed(1)}%</strong></div>
             </div>
+            <div className="panel-heading"><div><h2>Method comparison · rolling validation</h2><p>Methods were selected here; final test metrics below are held separate.</p></div></div>
             <div className="model-score-list">
               {run.scores.map((score) => (
                 <div key={score.method} className={score.method === run.method ? "selected" : ""}>
-                  <strong>{score.method}</strong><span>MAE {formatMoney(score.mae, modelCurrency, 2)}</span><span>RMSE {formatMoney(score.rmse, modelCurrency, 2)}</span><span>sMAPE {score.smape.toFixed(1)}%</span>
+                  <strong>{score.method}</strong><span>Validation MAE {formatMoney(score.mae, modelCurrency, 2)}</span><span>RMSE {formatMoney(score.rmse, modelCurrency, 2)}</span><span>sMAPE {score.smape.toFixed(1)}%</span>
+                </div>
+              ))}
+            </div>
+            <div className="model-score-list">
+              {run.horizonScores.map((score) => (
+                <div key={score.horizon}>
+                  <strong>Final test · step {score.horizon}</strong>
+                  <span>MAE {formatMoney(score.mae, modelCurrency, 2)}</span>
+                  <span>RMSE {formatMoney(score.rmse, modelCurrency, 2)}</span>
+                  <span>sMAPE {score.smape.toFixed(1)}%</span>
                 </div>
               ))}
             </div>
@@ -1926,7 +2040,7 @@ function ForecastView({
           </section>
           <section className="panel data-caveat">
             <div className="caveat-mark"><CircleHelp size={16} /></div>
-            <div><strong>Review the backtest before relying on projections</strong><p>The model selection is an automatically scored historical holdout, not independent validation. Check whether the holdout represents your business and whether unusual items, seasonality, or planned future transactions could change the result.</p></div>
+            <div><strong>Review the backtest before relying on projections</strong><p>Methods are selected on earlier rolling validation periods; the latest three periods are held back for a final test. That test is still small and historical, not independent evidence that the forecast will generalize. Check whether the test represents your business and whether unusual items, seasonality, or planned future transactions could change results.</p></div>
           </section>
           <button className="button button-secondary forecast-model-link" onClick={() => onView("models")} type="button">Review model lab <ArrowRight size={15} /></button>
         </>
@@ -2174,7 +2288,7 @@ function AssistantView({ dataset }: { dataset: DatasetContext }) {
   );
 }
 
-type TrendMethod = "Last period" | "3-period average" | "Linear trend";
+type TrendMethod = "Last period" | "3-period average" | "Linear trend" | "Seasonal naive";
 
 type TrendScore = {
   method: TrendMethod;
@@ -2183,14 +2297,23 @@ type TrendScore = {
   smape: number;
 };
 
+type TrendHorizonScore = {
+  horizon: number;
+  mae: number;
+  rmse: number;
+  smape: number;
+};
+
 type TrendRun = {
   interval: "day" | "month";
   holdoutCount: number;
+  validationOriginCount: number;
   mae: number;
   rmse: number;
   smape: number;
   method: TrendMethod;
   scores: TrendScore[];
+  horizonScores: TrendHorizonScore[];
   backtest: { month: string; actual: number; estimate: number }[];
   forecasts: { month: string; estimate: number }[];
 };
@@ -2207,13 +2330,34 @@ function linearTrend(points: TrendPoint[], x: number) {
   return meanY + slope * (x - meanX);
 }
 
-function predictTrend(method: TrendMethod, history: TrendPoint[], time: number) {
+function predictTrend(
+  method: TrendMethod,
+  history: TrendPoint[],
+  time: number,
+  horizon = 1,
+  seasonalPeriod = 0,
+) {
   if (method === "Linear trend") return linearTrend(history, time);
   if (method === "3-period average") {
     const window = history.slice(-3);
     return window.reduce((sum, point) => sum + point.net, 0) / window.length;
   }
+  if (method === "Seasonal naive" && seasonalPeriod > 0) {
+    const seasonalIndex = history.length - seasonalPeriod + ((horizon - 1) % seasonalPeriod);
+    return history[Math.max(0, seasonalIndex)].net;
+  }
   return history[history.length - 1].net;
+}
+
+function scoreErrors(actual: number[], predictions: number[]) {
+  const errors = actual.map((value, index) => value - predictions[index]);
+  const mae = errors.reduce((sum, error) => sum + Math.abs(error), 0) / errors.length;
+  const rmse = Math.sqrt(errors.reduce((sum, error) => sum + error ** 2, 0) / errors.length);
+  const smape = actual.reduce((sum, value, index) => {
+    const denominator = Math.abs(value) + Math.abs(predictions[index]);
+    return sum + (denominator ? 200 * Math.abs(errors[index]) / denominator : 0);
+  }, 0) / actual.length;
+  return { mae, rmse, smape };
 }
 
 function scorePredictions(
@@ -2221,35 +2365,53 @@ function scorePredictions(
   actual: TrendPoint[],
   predictions: number[],
 ): TrendScore {
-  const errors = actual.map((point, index) => point.net - predictions[index]);
-  const mae = errors.reduce((sum, error) => sum + Math.abs(error), 0) / errors.length;
-  const rmse = Math.sqrt(errors.reduce((sum, error) => sum + error ** 2, 0) / errors.length);
-  const smape = actual.reduce((sum, point, index) => {
-    const denominator = Math.abs(point.net) + Math.abs(predictions[index]);
-    return sum + (denominator ? 200 * Math.abs(errors[index]) / denominator : 0);
-  }, 0) / actual.length;
-  return { method, mae, rmse, smape };
+  return {
+    method,
+    ...scoreErrors(actual.map((point) => point.net), predictions),
+  };
 }
 
 function trainTrendBaseline(series: TrendPoint[], interval: "day" | "month"): TrendRun {
-  const holdoutCount = Math.max(1, Math.floor(series.length * 0.2));
-  const trainingCount = series.length - holdoutCount;
-  const holdout = series.slice(trainingCount);
+  const horizonCount = 3;
+  const holdoutStart = series.length - horizonCount;
+  const seasonalPeriod = interval === "day" ? 7 : 12;
   const methods: TrendMethod[] = ["Last period", "3-period average", "Linear trend"];
+  const includeSeasonal = series.length >= seasonalPeriod + 8;
+  if (includeSeasonal) methods.push("Seasonal naive");
+  const firstValidationOrigin = includeSeasonal ? seasonalPeriod : 3;
   const candidateRuns = methods.map((method) => {
-    const predictions = holdout.map((point, index) =>
-      predictTrend(method, series.slice(0, trainingCount + index), point.time),
-    );
+    const actual: number[] = [];
+    const predictions: number[] = [];
+    for (let origin = firstValidationOrigin; origin <= holdoutStart - horizonCount; origin += 1) {
+      const history = series.slice(0, origin);
+      for (let horizon = 1; horizon <= horizonCount; horizon += 1) {
+        const target = series[origin + horizon - 1];
+        actual.push(target.net);
+        predictions.push(
+          predictTrend(method, history, target.time, horizon, seasonalPeriod),
+        );
+      }
+    }
     return {
-      score: scorePredictions(method, holdout, predictions),
-      predictions,
+      method,
+      score: scoreErrors(actual, predictions),
     };
   });
   const selected = candidateRuns.reduce((best, candidate) =>
     candidate.score.mae < best.score.mae ? candidate : best,
   );
-  const { method, mae, rmse, smape } = selected.score;
-  const allPoints = series;
+  const { method } = selected;
+  const holdout = series.slice(holdoutStart);
+  const holdoutHistory = series.slice(0, holdoutStart);
+  const holdoutPredictions = holdout.map((point, index) =>
+    predictTrend(method, holdoutHistory, point.time, index + 1, seasonalPeriod),
+  );
+  const { mae, rmse, smape } = scorePredictions(method, holdout, holdoutPredictions);
+  const horizonScores = holdout.map((point, index) => ({
+    horizon: index + 1,
+    ...scoreErrors([point.net], [holdoutPredictions[index]]),
+  }));
+  const validationOriginCount = holdoutStart - horizonCount - firstValidationOrigin + 1;
   const lastPeriod = series[series.length - 1].month;
   const forecasts = [0, 1, 2].map((offset) => {
     const date = interval === "day"
@@ -2263,30 +2425,39 @@ function trainTrendBaseline(series: TrendPoint[], interval: "day" | "month"): Tr
     const time = interval === "day"
       ? Date.parse(`${key}T00:00:00Z`) / 86_400_000
       : Number(key.slice(0, 4)) * 12 + Number(key.slice(5, 7)) - 1;
-    return { month: key, estimate: predictTrend(method, allPoints, time) };
+    return {
+      month: key,
+      estimate: predictTrend(method, series, time, offset + 1, seasonalPeriod),
+    };
   });
   return {
     interval,
-    holdoutCount,
+    holdoutCount: horizonCount,
+    validationOriginCount,
     mae,
     rmse,
     smape,
     method,
-    scores: candidateRuns.map((candidate) => candidate.score).sort((left, right) => left.mae - right.mae),
+    scores: candidateRuns
+      .map((candidate) => ({ method: candidate.method, ...candidate.score }))
+      .sort((left, right) => left.mae - right.mae),
+    horizonScores,
     backtest: holdout.map((point, index) => ({
       month: point.month,
       actual: point.net,
-      estimate: selected.predictions[index],
+      estimate: holdoutPredictions[index],
     })),
     forecasts,
   };
 }
 
 function ModelsView({
-  modelInterval, modelSeries, modelCurrency, onTrain, onView, run, sourceKind, sourceName,
+  modelInterval, modelSeries, modelMissingPeriods, modelDateCoverage, modelCurrency, onTrain, onView, run, sourceKind, sourceName,
 }: {
   modelSeries: TrendPoint[];
   modelInterval: "day" | "month";
+  modelMissingPeriods: number;
+  modelDateCoverage: number;
   modelCurrency: string;
   onTrain: (run: TrendRun) => void;
   onView: (view: View) => void;
@@ -2294,7 +2465,14 @@ function ModelsView({
   sourceKind: "demo" | "local";
   sourceName: string;
 }) {
-  const canTrain = modelSeries.length >= 5;
+  const [zeroFillConfirmed, setZeroFillConfirmed] = useState(false);
+  useEffect(() => {
+    setZeroFillConfirmed(false);
+  }, [modelSeries, modelMissingPeriods]);
+  const minimumHistory = 11;
+  const canTrain = modelSeries.length >= minimumHistory
+    && modelDateCoverage >= 0.8
+    && (modelMissingPeriods === 0 || zeroFillConfirmed);
   const dataLabel = sourceKind === "demo" ? "sales less returns" : "net transaction movement";
 
   return (
@@ -2302,20 +2480,54 @@ function ModelsView({
       <div className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />MODEL OPERATIONS</div><h1>Model lab</h1><p>Compare forecasting baselines with a chronological walk-forward backtest.</p></div><span className={`readiness-state ${run ? "ready" : "pending"}`}>{run ? `${run.method} selected` : "Ready to train"}</span></div>
       <section className="panel model-status-panel">
         <div className="model-status-head"><div className="model-status-icon"><Sparkles size={20} /></div><div><span className="eyebrow">LOCAL MODEL COMPARISON</span><h2>{run ? `${run.method} selected after backtesting` : "Train on the current transaction timeline"}</h2></div></div>
-        <p>Compares last-period, three-period moving-average, and linear-trend forecasts of {modelInterval === "month" ? "monthly" : "daily"} {dataLabel} using sequential walk-forward predictions on the latest chronological holdout. The lowest holdout MAE is selected. Forecasts run in this browser; no rows are uploaded.</p>
+        <p>Compares simple baselines for {modelInterval === "month" ? "monthly" : "daily"} {dataLabel}. Methods are selected on rolling historical tests, then checked on the latest three periods kept separate from selection. Accuracy is reported for each forecast step. Forecasts run in this browser; no rows are uploaded.</p>
         <div className="model-facts">
           <div><span>Training dataset</span><strong>{sourceName}</strong></div>
           <div><span>Dated {modelInterval === "month" ? "monthly" : "daily"} points</span><strong>{modelSeries.length}</strong></div>
-          <div><span>Backtest holdout</span><strong>{run ? `${run.holdoutCount} period${run.holdoutCount === 1 ? "" : "s"}` : "Not run"}</strong></div>
-          <div><span>Selected MAE</span><strong>{run ? formatMoney(run.mae, modelCurrency, 2) : "Not measured"}</strong></div>
+          <div><span>Dated rows</span><strong>{(modelDateCoverage * 100).toFixed(0)}%</strong></div>
+          <div><span>Rolling validation origins</span><strong>{run ? run.validationOriginCount : "Not run"}</strong></div>
+          <div><span>Final test periods</span><strong>{run ? run.holdoutCount : "Not run"}</strong></div>
+          <div><span>Final test MAE</span><strong>{run ? formatMoney(run.mae, modelCurrency, 2) : "Not measured"}</strong></div>
         </div>
+        {modelMissingPeriods > 0 && (
+          <label className="balance-confirmation">
+            <input
+              checked={zeroFillConfirmed}
+              onChange={(event) => setZeroFillConfirmed(event.target.checked)}
+              type="checkbox"
+            />
+            <span>
+              I confirm the {modelMissingPeriods} missing {modelInterval === "month" ? "months" : "days"} between the first and last dated records mean zero activity, not missing CSV coverage.
+            </span>
+          </label>
+        )}
         <div className="heading-actions">
           <button className="button button-primary" disabled={!canTrain} onClick={() => onTrain(trainTrendBaseline(modelSeries, modelInterval))} type="button"><Sparkles size={15} />Train & backtest</button>
           <button className="button button-secondary" onClick={() => onView("analysis")} type="button">Review transaction analysis <ArrowRight size={15} /></button>
         </div>
-        {!canTrain && <p className="model-requirement">At least five consecutive dated periods in one known currency are needed for a useful holdout comparison. Add or select a suitable CSV to continue.</p>}
+        {modelSeries.length < minimumHistory && (
+          <p className="model-requirement">
+            At least {minimumHistory} consecutive {modelInterval === "month" ? "months" : "days"} in one known currency are needed for three rolling validation origins and a separate three-period test. Current history: {modelSeries.length}.
+          </p>
+        )}
+        {modelDateCoverage < 0.8 && (
+          <p className="model-requirement">
+            At least 80% of transaction rows need usable dates for a reliable timeline. Current dated coverage: {(modelDateCoverage * 100).toFixed(0)}%.
+          </p>
+        )}
+        {modelSeries.length >= minimumHistory && modelMissingPeriods > 0 && !zeroFillConfirmed && (
+          <p className="model-requirement">
+            Training is paused because gaps could mean missing records. Confirm zero activity above, or add complete dated data.
+          </p>
+        )}
+        {modelSeries.length >= (modelInterval === "month" ? 20 : 15) && (
+          <p className="model-requirement">
+            Seasonal-naive comparison is available because this series includes enough history for a {modelInterval === "month" ? "yearly" : "weekly"} seasonal baseline.
+          </p>
+        )}
         {run && (
           <>
+            <div className="panel-heading"><div><h2>Rolling validation · method selection</h2><p>Lower MAE is used to select a method; these results do not include the final test period.</p></div></div>
             <div className="model-score-list">
               {run.scores.map((score) => (
                 <div key={score.method} className={score.method === run.method ? "selected" : ""}>
@@ -2327,7 +2539,20 @@ function ModelsView({
               ))}
             </div>
             <div className="model-backtest-panel">
-              <div className="panel-heading"><div><h2>Walk-forward holdout</h2><p>Actual movement compared with the selected model</p></div></div>
+              <div className="panel-heading"><div><h2>Final test accuracy by forecast step</h2><p>One untouched three-period window, predicted from the same starting point</p></div></div>
+              <div className="model-score-list">
+                {run.horizonScores.map((score) => (
+                  <div key={score.horizon}>
+                    <strong>Step {score.horizon}</strong>
+                    <span>MAE {formatMoney(score.mae, modelCurrency, 2)}</span>
+                    <span>RMSE {formatMoney(score.rmse, modelCurrency, 2)}</span>
+                    <span>sMAPE {score.smape.toFixed(1)}%</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="model-backtest-panel">
+              <div className="panel-heading"><div><h2>Untouched final test</h2><p>Actual movement compared with the selected method at each forecast step</p></div></div>
               <div className="chart-wrap">
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={run.backtest} margin={{ top: 12, right: 8, left: 0, bottom: 0 }}>
@@ -2353,11 +2578,13 @@ function ModelsView({
       </section>
       <section className="panel data-caveat">
         <div className="caveat-mark"><CircleHelp size={16} /></div>
-        <div><strong>Review data coverage and holdout size</strong><p>{modelSeries.length < 12
-          ? `This dataset has only ${modelSeries.length} dated ${modelInterval === "month" ? "months" : "days"}; the holdout is too small to judge predictive quality. `
-          : ""}{sourceKind === "demo"
+        <div><strong>Review data coverage and test results</strong><p>{modelSeries.length < minimumHistory
+          ? `This dataset has only ${modelSeries.length} dated ${modelInterval === "month" ? "months" : "days"}; there is not enough history for a separate final test and rolling validation. `
+          : modelSeries.length < (modelInterval === "month" ? 20 : 15)
+            ? `This dataset can support baseline comparison, but has too little history for the ${modelInterval === "month" ? "yearly" : "weekly"} seasonal method. `
+            : ""}{sourceKind === "demo"
           ? "UCI Online Retail is historic invoice-line sales and returns, not cash receipts or payments; it is useful for exploring trend comparison only."
-          : "Your file may contain sales or non-cash transactions. Confirm the source rows represent actual cash movements before using balance projection."} Holdout metrics are retrospective diagnostics, not a guarantee of future performance.</p></div>
+          : "Your file may contain sales or non-cash transactions. Confirm its date range is complete and the rows represent actual cash movements before using balance projection."} The final test covers only three periods. Results are retrospective diagnostics, not a guarantee of future performance.</p></div>
       </section>
     </>
   );
